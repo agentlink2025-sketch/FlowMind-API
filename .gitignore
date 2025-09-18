@@ -6,3 +6,4 @@ lib/
 lib64/
 app.log
 pyvenv.cfg
+entrypoint.sh
