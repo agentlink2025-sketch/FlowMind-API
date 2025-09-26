@@ -3,26 +3,13 @@ import os
 import time
 import json
 import random
-import logging
 from typing import List, Optional, Literal, AsyncGenerator
-from datetime import datetime
 
 import requests
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
-
-# ===== 日志配置 =====
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('api.log'),
-        logging.StreamHandler()
-    ]
-)
-logger = logging.getLogger(__name__)
 
 # ===== FastAPI 基础配置 =====
 app = FastAPI()
@@ -120,7 +107,6 @@ def call_deepseek_stream(messages: List[dict], timeout: float = 60.0):
 def call_deepseek(messages: List[dict], timeout: float = 60.0) -> str:
     """调用DeepSeek API，支持重试机制和更好的错误处理"""
     if not DEEPSEEK_API_KEY:
-        logger.error("DEEPSEEK_API_KEY 未配置")
         raise HTTPException(status_code=500, detail="服务未配置 DEEPSEEK_API_KEY。")
 
     headers = {
@@ -133,102 +119,67 @@ def call_deepseek(messages: List[dict], timeout: float = 60.0) -> str:
         "temperature": 0.1,
     }
 
-    # 记录请求信息
-    request_id = f"req_{int(time.time() * 1000)}"
-    logger.info(f"[{request_id}] 开始调用DeepSeek API，超时设置: {timeout}秒")
-    logger.debug(f"[{request_id}] 请求消息数量: {len(messages)}")
-    logger.debug(f"[{request_id}] 请求内容: {json.dumps(messages, ensure_ascii=False)}")
-
     # 重试机制
     max_retries = 3
     for attempt in range(max_retries):
-        attempt_start = time.time()
-        logger.info(f"[{request_id}] 第 {attempt + 1} 次尝试，开始时间: {datetime.now().strftime('%H:%M:%S.%f')[:-3]}")
-        
+        start = time.time()
         try:
             resp = requests.post(API_URL, json=payload, headers=headers, timeout=timeout)
-            attempt_duration = time.time() - attempt_start
             
-            logger.info(f"[{request_id}] 第 {attempt + 1} 次尝试完成，耗时: {attempt_duration:.2f}秒，状态码: {resp.status_code}")
-            
-            if time.time() - attempt_start > timeout:
-                logger.error(f"[{request_id}] 业务层超时，实际耗时: {time.time() - attempt_start:.2f}秒，设置超时: {timeout}秒")
+            if time.time() - start > timeout:
                 raise HTTPException(status_code=504, detail="调用大模型超时（业务层）")
 
             if resp.status_code >= 400:
                 try:
                     err = resp.json()
                     error_msg = err.get('message', '未知错误')
-                    logger.warning(f"[{request_id}] API返回错误，状态码: {resp.status_code}, 错误信息: {error_msg}")
                 except Exception:
                     error_msg = resp.text
-                    logger.warning(f"[{request_id}] API返回错误，状态码: {resp.status_code}, 原始响应: {resp.text[:200]}...")
                 
                 # 如果是认证错误，不重试
                 if resp.status_code == 401:
-                    logger.error(f"[{request_id}] API认证失败，不进行重试")
                     raise HTTPException(status_code=502, detail=f"API认证失败：{error_msg}")
                 
                 # 如果是服务器错误且还有重试次数，则重试
                 if resp.status_code >= 500 and attempt < max_retries - 1:
                     wait_time = (2 ** attempt) + random.uniform(0, 1)  # 指数退避 + 随机抖动
-                    logger.warning(f"[{request_id}] API服务器错误({resp.status_code})，{wait_time:.1f}秒后重试 (第{attempt + 1}次)")
+                    print(f"API服务器错误，{wait_time:.1f}秒后重试 (第{attempt + 1}次)")
                     time.sleep(wait_time)
                     continue
                 
-                logger.error(f"[{request_id}] API调用失败，状态码: {resp.status_code}, 错误: {error_msg}")
                 raise HTTPException(status_code=502, detail=f"API调用失败：{error_msg}")
 
             try:
                 data = resp.json()
-                response_content = data["choices"][0]["message"]["content"]
-                logger.info(f"[{request_id}] API调用成功，返回内容长度: {len(response_content)}字符")
-                logger.debug(f"[{request_id}] 返回内容预览: {response_content[:100]}...")
-                return response_content
+                return data["choices"][0]["message"]["content"]
             except Exception as e:
-                logger.error(f"[{request_id}] 解析API响应失败: {str(e)}")
-                logger.debug(f"[{request_id}] 原始响应: {resp.text[:500]}...")
                 raise HTTPException(status_code=502, detail=f"解析大模型返回失败：{str(e)}")
                 
-        except requests.exceptions.Timeout as e:
-            attempt_duration = time.time() - attempt_start
-            logger.warning(f"[{request_id}] 第 {attempt + 1} 次尝试超时，耗时: {attempt_duration:.2f}秒，设置超时: {timeout}秒")
-            
+        except requests.exceptions.Timeout:
             if attempt < max_retries - 1:
                 wait_time = (2 ** attempt) + random.uniform(0, 1)
-                logger.info(f"[{request_id}] 超时重试，{wait_time:.1f}秒后重试 (第{attempt + 1}次)")
+                print(f"请求超时，{wait_time:.1f}秒后重试 (第{attempt + 1}次)")
                 time.sleep(wait_time)
                 continue
-            logger.error(f"[{request_id}] 所有重试均超时，总耗时: {time.time() - attempt_start:.2f}秒")
             raise HTTPException(status_code=504, detail="调用大模型超时，请稍后重试")
             
         except requests.exceptions.ConnectionError as e:
-            attempt_duration = time.time() - attempt_start
-            logger.warning(f"[{request_id}] 第 {attempt + 1} 次尝试连接错误，耗时: {attempt_duration:.2f}秒，错误: {str(e)}")
-            
             if attempt < max_retries - 1:
                 wait_time = (2 ** attempt) + random.uniform(0, 1)
-                logger.info(f"[{request_id}] 连接错误重试，{wait_time:.1f}秒后重试 (第{attempt + 1}次)")
+                print(f"连接错误，{wait_time:.1f}秒后重试 (第{attempt + 1}次)")
                 time.sleep(wait_time)
                 continue
-            logger.error(f"[{request_id}] 所有重试均连接失败，总耗时: {time.time() - attempt_start:.2f}秒")
             raise HTTPException(status_code=502, detail="网络连接失败，请检查网络设置")
             
         except requests.exceptions.RequestException as e:
-            attempt_duration = time.time() - attempt_start
-            logger.warning(f"[{request_id}] 第 {attempt + 1} 次尝试请求异常，耗时: {attempt_duration:.2f}秒，错误: {str(e)}")
-            
             if attempt < max_retries - 1:
                 wait_time = (2 ** attempt) + random.uniform(0, 1)
-                logger.info(f"[{request_id}] 请求异常重试，{wait_time:.1f}秒后重试 (第{attempt + 1}次)")
+                print(f"请求异常，{wait_time:.1f}秒后重试 (第{attempt + 1}次)")
                 time.sleep(wait_time)
                 continue
-            logger.error(f"[{request_id}] 所有重试均请求异常，总耗时: {time.time() - attempt_start:.2f}秒")
             raise HTTPException(status_code=502, detail=f"调用大模型失败：{str(e)}")
     
     # 如果所有重试都失败了
-    total_duration = time.time() - attempt_start
-    logger.error(f"[{request_id}] 所有重试均失败，总耗时: {total_duration:.2f}秒")
     raise HTTPException(status_code=502, detail="调用大模型失败，已重试多次")
 
 # ===== 健康检查 =====
@@ -285,22 +236,11 @@ def chat_sync(req: ChatReq):
 @app.post("/api/chat/miniprogram")
 def chat_miniprogram(req: ChatReq):
     """微信小程序专用接口 - 分块返回，增强错误处理"""
-    request_start = time.time()
-    request_id = f"miniprogram_{int(time.time() * 1000)}"
-    
-    logger.info(f"[{request_id}] 收到miniprogram请求，超时设置: {req.timeout or 60.0}秒")
-    logger.debug(f"[{request_id}] 请求详情: prompt={req.prompt[:50] if req.prompt else 'None'}..., messages_count={len(req.messages) if req.messages else 0}")
+    messages = build_messages(req)
     
     try:
-        messages = build_messages(req)
-        logger.info(f"[{request_id}] 构建消息完成，消息数量: {len(messages)}")
-        
         # 调用 DeepSeek 获取完整回答
-        api_start = time.time()
         answer = call_deepseek(messages, timeout=req.timeout or 60.0)
-        api_duration = time.time() - api_start
-        
-        logger.info(f"[{request_id}] DeepSeek API调用完成，耗时: {api_duration:.2f}秒，回答长度: {len(answer)}字符")
         
         # 将回答分成小块（按字符分割，模拟打字效果）
         chunks = []
@@ -308,9 +248,6 @@ def chat_miniprogram(req: ChatReq):
         
         for i in range(0, len(answer), chunk_size):
             chunks.append(answer[i:i+chunk_size])
-        
-        total_duration = time.time() - request_start
-        logger.info(f"[{request_id}] 请求处理完成，总耗时: {total_duration:.2f}秒，分块数量: {len(chunks)}")
         
         return {
             "code": 200,
@@ -324,12 +261,8 @@ def chat_miniprogram(req: ChatReq):
             }
         }
     except HTTPException as e:
-        total_duration = time.time() - request_start
-        error_detail = str(e.detail)
-        
-        logger.error(f"[{request_id}] HTTP异常，耗时: {total_duration:.2f}秒，错误: {error_detail}")
-        
         # 根据错误类型返回不同的错误信息
+        error_detail = str(e.detail)
         if "超时" in error_detail:
             error_msg = "请求超时，请稍后重试"
         elif "连接失败" in error_detail or "网络" in error_detail:
@@ -350,9 +283,6 @@ def chat_miniprogram(req: ChatReq):
             }
         }
     except Exception as e:
-        total_duration = time.time() - request_start
-        logger.error(f"[{request_id}] 未知异常，耗时: {total_duration:.2f}秒，错误: {str(e)}")
-        
         return {
             "code": 500,
             "message": "error",
@@ -414,67 +344,41 @@ def chat_simple(req: ChatReq):
 @app.get("/api/health/network")
 def check_network():
     """检查网络连通性"""
-    check_id = f"network_check_{int(time.time() * 1000)}"
-    check_start = time.time()
-    
-    logger.info(f"[{check_id}] 开始网络健康检查")
-    
     try:
         # 测试到DeepSeek API的连通性
-        logger.info(f"[{check_id}] 测试连接到 api.deepseek.com")
         resp = requests.get("https://api.deepseek.com", timeout=10)
-        check_duration = time.time() - check_start
-        
-        logger.info(f"[{check_id}] 网络检查成功，耗时: {check_duration:.2f}秒，状态码: {resp.status_code}")
-        
         return {
             "code": 200,
             "message": "网络正常",
             "data": {
                 "deepseek_api": "可访问",
-                "response_time": f"{check_duration:.2f}秒",
-                "status_code": resp.status_code,
                 "timestamp": int(time.time())
             }
         }
-    except requests.exceptions.Timeout as e:
-        check_duration = time.time() - check_start
-        logger.warning(f"[{check_id}] 网络检查超时，耗时: {check_duration:.2f}秒，错误: {str(e)}")
-        
+    except requests.exceptions.Timeout:
         return {
             "code": 500,
             "message": "网络超时",
             "data": {
                 "deepseek_api": "超时",
-                "response_time": f"{check_duration:.2f}秒",
-                "error": str(e),
                 "timestamp": int(time.time())
             }
         }
-    except requests.exceptions.ConnectionError as e:
-        check_duration = time.time() - check_start
-        logger.warning(f"[{check_id}] 网络连接失败，耗时: {check_duration:.2f}秒，错误: {str(e)}")
-        
+    except requests.exceptions.ConnectionError:
         return {
             "code": 500,
             "message": "网络连接失败",
             "data": {
                 "deepseek_api": "无法连接",
-                "response_time": f"{check_duration:.2f}秒",
-                "error": str(e),
                 "timestamp": int(time.time())
             }
         }
     except Exception as e:
-        check_duration = time.time() - check_start
-        logger.error(f"[{check_id}] 网络检查异常，耗时: {check_duration:.2f}秒，错误: {str(e)}")
-        
         return {
             "code": 500,
             "message": "网络检查失败",
             "data": {
                 "error": str(e),
-                "response_time": f"{check_duration:.2f}秒",
                 "timestamp": int(time.time())
             }
         }

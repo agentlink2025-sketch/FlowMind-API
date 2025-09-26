@@ -13,13 +13,13 @@ WORKERS="${WORKERS:-2}"
 
 # ===== 虚拟环境检查 =====
 # 检查虚拟环境是否存在
-if [ ! -d "myprojectenv" ]; then
+if [ ! -d ".venv" ]; then
     echo "Creating virtual environment..."
-    python3 -m venv myprojectenv
+    python3 -m venv .venv
 fi
 
 # 激活虚拟环境
-source myprojectenv/bin/activate
+source .venv/bin/activate
 
 # ===== 依赖安装 =====
 # 安装依赖（如果存在 requirements.txt）
